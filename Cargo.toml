@@ -5,6 +5,7 @@ members = [
     "tools/bottlerocket-variant",
     "tools/buildsys",
     "tools/parse-datetime",
+    "tools/pipesys",
     "tools/pubsys",
     "tools/pubsys-config",
     "tools/pubsys-setup",
