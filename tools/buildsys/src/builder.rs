@@ -380,7 +380,8 @@ impl DockerBuild {
             --target {target} \
             --tag {tag} \
             --network host \
-            --file {dockerfile}",
+            --file {dockerfile} \
+            --build-arg BYPASS_SOCKET={tag}-bypass",
             context = self.context.display(),
             dockerfile = self.dockerfile.display(),
             target = self.target,
@@ -391,12 +392,38 @@ impl DockerBuild {
         build.extend(self.build_args());
         build.extend(self.secrets_args.clone());
 
+        // Run a container with the project's root as a read-only volume mount, so that pipesys can
+        // serve a read-only file descriptor that's safe to pass into builds.
+        let run_bypass = format!(
+            "run \
+            --name {tag}-bypass \
+            --rm \
+            --init \
+            --net host \
+            --pid host \
+            -u 0 \
+            -v {root}:/bypass:ro \
+            -v {root}/build/tools/pipesys:/usr/local/bin/pipesys:ro \
+            {sdk} \
+            pipesys serve --socket {tag}-bypass --client-uid 0 --path /bypass",
+            tag = self.tag,
+            root = self.root_dir.display(),
+            sdk = self.common_build_args.sdk,
+        )
+        .split_string();
+
+        let rm_bypass = format!("rm --force {}-bypass", self.tag).split_string();
+
+        // Helper inputs for the build container.
         let create = format!("create --name {} {} true", self.tag, self.tag).split_string();
         let cp = format!("cp {}:/output/. {}", self.tag, marker_dir.display()).split_string();
         let rm = format!("rm --force {}", self.tag).split_string();
         let rmi = format!("rmi --force {}", self.tag).split_string();
 
-        // Clean up the stopped container if it exists.
+        // Clean up the stopped bypass container if it exists.
+        let _ = docker(&rm_bypass, Retry::No);
+
+        // Clean up the stopped build container if it exists.
         let _ = docker(&rm, Retry::No);
 
         // Clean up the previous image if it exists.
@@ -418,9 +445,15 @@ impl DockerBuild {
                 .await
         });
 
+        // Spawn a background task for the bypass container that will serve the project root file
+        // descriptor.
+        runtime.spawn(async move {
+            let _ = docker(&run_bypass, Retry::No);
+        });
+
         // Build the image, which builds the artifacts we want.
         // Work around transient, known failure cases with Docker.
-        docker(
+        let build_result = docker(
             &build,
             Retry::Yes {
                 attempts: DOCKER_BUILD_MAX_ATTEMPTS,
@@ -431,10 +464,16 @@ impl DockerBuild {
                     &*CREATEREPO_C_READ_HEADER_ERROR,
                 ],
             },
-        )?;
+        );
+
+        // Clean up our bypass container.
+        let _ = docker(&rm_bypass, Retry::No);
 
         // Stop the runtime and the background threads.
         runtime.shutdown_background();
+
+        // Check whether the build succeeded before continuing.
+        build_result?;
 
         // Create a stopped container so we can copy artifacts out.
         docker(&create, Retry::No)?;
