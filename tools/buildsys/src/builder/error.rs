@@ -4,6 +4,9 @@ use std::path::PathBuf;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(super)))]
 pub(crate) enum Error {
+    #[snafu(display("Failed to create async runtime: {}", source))]
+    AsyncRuntime { source: std::io::Error },
+
     #[snafu(display("Failed to start command: {}", source))]
     CommandStart { source: std::io::Error },
 
@@ -46,6 +49,24 @@ pub(crate) enum Error {
         source: std::io::Error,
     },
 
+    #[snafu(display(
+        "Found mismatched {} file descriptors: {} != {}",
+        what,
+        expected,
+        actual
+    ))]
+    FileDescriptorMismatch {
+        what: String,
+        expected: String,
+        actual: String,
+    },
+
+    #[snafu(display("Failed to parse '{}' as a file descriptor: {}", input, source))]
+    FileDescriptorParse {
+        input: String,
+        source: std::num::ParseIntError,
+    },
+
     #[snafu(display("Failed to remove file '{}': {}", path.display(), source))]
     FileRemove {
         path: PathBuf,
@@ -64,6 +85,9 @@ pub(crate) enum Error {
         var: String,
         source: std::env::VarError,
     },
+
+    #[snafu(display("Failed to match input '{}' with regex '{}'", input, regex))]
+    RegexMatch { input: String, regex: String },
 
     #[snafu(display("Failed to strip prefix '{}' from path '{}': {}", prefix.display(), path.display(), source))]
     StripPathPrefix {

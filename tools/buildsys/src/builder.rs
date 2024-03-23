@@ -14,6 +14,7 @@ use duct::cmd;
 use error::Result;
 use lazy_static::lazy_static;
 use nonzero_ext::nonzero;
+use pipesys::server::Server as PipesysServer;
 use rand::Rng;
 use regex::Regex;
 use sha2::{Digest, Sha512};
@@ -85,28 +86,36 @@ lazy_static! {
 
 static DOCKER_BUILD_MAX_ATTEMPTS: NonZeroU16 = nonzero!(10u16);
 
+// Expected UID for unprivileged processes inside the build container.
+const BUILDER_UID: u32 = 1000;
+
+// `cargo` passes the jobserver file descriptors through this environment variable.
+const CARGO_MAKEFLAGS: &str = "CARGO_MAKEFLAGS";
+
 struct CommonBuildArgs {
     arch: SupportedArch,
     sdk: String,
     nocache: String,
     token: String,
+    jobs_socket: String,
 }
 
 impl CommonBuildArgs {
     fn new(root: impl AsRef<Path>, sdk: String, arch: SupportedArch) -> Self {
-        let mut d = Sha512::new();
-        d.update(root.as_ref().display().to_string());
-        let digest = hex::encode(d.finalize());
-        let token = digest[..12].to_string();
+        let token = token(&root);
 
         // Avoid using a cached layer from a previous build.
         let nocache = rand::thread_rng().gen::<u32>().to_string();
+
+        // Generate a unique address for the socket that sends jobserver file descriptors.
+        let jobs_socket = format!("buildsys-jobserver-{token}-{nocache}");
 
         Self {
             arch,
             sdk,
             nocache,
             token,
+            jobs_socket,
         }
     }
 }
@@ -130,8 +139,6 @@ struct PackageBuildArgs {
 impl PackageBuildArgs {
     fn build_args(&self) -> Vec<String> {
         let mut args = Vec::new();
-        args.push("--network".into());
-        args.push("none".into());
         args.build_arg("PACKAGE", &self.package);
         args.build_arg("REPO", &self.publish_repo);
         args.build_arg("VARIANT", &self.variant);
@@ -171,8 +178,6 @@ struct VariantBuildArgs {
 impl VariantBuildArgs {
     fn build_args(&self) -> Vec<String> {
         let mut args = Vec::new();
-        args.push("--network".into());
-        args.push("host".into());
         args.build_arg(
             "DATA_IMAGE_PUBLISH_SIZE_GIB",
             self.data_image_publish_size_gib.to_string(),
@@ -374,6 +379,7 @@ impl DockerBuild {
             "build {context} \
             --target {target} \
             --tag {tag} \
+            --network host \
             --file {dockerfile}",
             context = self.context.display(),
             dockerfile = self.dockerfile.display(),
@@ -396,6 +402,22 @@ impl DockerBuild {
         // Clean up the previous image if it exists.
         let _ = docker(&rmi, Retry::No);
 
+        // Get the jobserver file descriptors for pipesys to serve.
+        let cargo_makeflags = env::var(CARGO_MAKEFLAGS).context(error::EnvironmentSnafu {
+            var: CARGO_MAKEFLAGS,
+        })?;
+        let (read_fd, write_fd) = parse_makeflags(cargo_makeflags)?;
+        let jobs_socket = self.common_build_args.jobs_socket.clone();
+
+        let runtime = tokio::runtime::Runtime::new().context(error::AsyncRuntimeSnafu)?;
+
+        // Spawn a background task to share the file descriptors for cargo's jobserver.
+        runtime.spawn(async move {
+            PipesysServer::for_fds(jobs_socket, BUILDER_UID, &[read_fd, write_fd])
+                .serve()
+                .await
+        });
+
         // Build the image, which builds the artifacts we want.
         // Work around transient, known failure cases with Docker.
         docker(
@@ -410,6 +432,9 @@ impl DockerBuild {
                 ],
             },
         )?;
+
+        // Stop the runtime and the background threads.
+        runtime.shutdown_background();
 
         // Create a stopped container so we can copy artifacts out.
         docker(&create, Retry::No)?;
@@ -438,8 +463,8 @@ impl DockerBuild {
         args.build_arg("GOARCH", self.common_build_args.arch.goarch());
         args.build_arg("SDK", &self.common_build_args.sdk);
         args.build_arg("NOCACHE", &self.common_build_args.nocache);
-        // Avoid using a cached layer from a concurrent build in another checkout.
         args.build_arg("TOKEN", &self.common_build_args.token);
+        args.build_arg("JOBS_SOCKET", &self.common_build_args.jobs_socket);
         args
     }
 }
@@ -697,7 +722,6 @@ where
 
 /// Compute a per-checkout suffix for the tag to avoid collisions.
 fn token(p: impl AsRef<Path>) -> String {
-    // Compute a per-checkout prefix for the tag to avoid collisions.
     let mut d = Sha512::new();
     d.update(p.as_ref().display().to_string());
     let digest = hex::encode(d.finalize());
@@ -764,5 +788,112 @@ where
 {
     fn split_string(&self) -> Vec<String> {
         self.as_ref().split(' ').map(String::from).collect()
+    }
+}
+
+// =^..^=   =^..^=   =^..^=   =^..^=   =^..^=   =^..^=   =^..^=   =^..^=   =^..^=   =^..^=   =^..^=
+
+lazy_static! {
+    static ref MAKEFLAGS: Regex = Regex::new(
+        "^-j \
+         --jobserver-fds=(?<read_fd>[0-9]+),(?<write_fd>[0-9]+) \
+         --jobserver-auth=(?<auth_read_fd>[0-9]+),(?<auth_write_fd>[0-9]+)$"
+    )
+    .unwrap();
+}
+
+/// Helper function for parsing file descriptors from `CARGO_MAKEFLAGS`.
+fn parse_makeflags<S>(input: S) -> Result<(i32, i32)>
+where
+    S: AsRef<str> + std::fmt::Display,
+{
+    let captures = MAKEFLAGS
+        .captures(input.as_ref())
+        .context(error::RegexMatchSnafu {
+            input: input.to_string(),
+            regex: MAKEFLAGS.to_string(),
+        })?;
+    let read_fd = &captures["read_fd"];
+    let write_fd = &captures["write_fd"];
+    let auth_read_fd = &captures["auth_read_fd"];
+    let auth_write_fd = &captures["auth_write_fd"];
+
+    ensure!(
+        read_fd == auth_read_fd,
+        error::FileDescriptorMismatchSnafu {
+            what: "read",
+            expected: read_fd,
+            actual: auth_read_fd,
+        }
+    );
+
+    ensure!(
+        write_fd == auth_write_fd,
+        error::FileDescriptorMismatchSnafu {
+            what: "write",
+            expected: write_fd,
+            actual: auth_write_fd,
+        }
+    );
+
+    let read_fd = read_fd
+        .parse::<i32>()
+        .context(error::FileDescriptorParseSnafu { input: read_fd })?;
+
+    let write_fd = write_fd
+        .parse::<i32>()
+        .context(error::FileDescriptorParseSnafu { input: write_fd })?;
+
+    Ok((read_fd, write_fd))
+}
+
+#[cfg(test)]
+macro_rules! assert_error {
+    ($result:expr, $error:ident) => {
+        match $result {
+            Err(error::Error::$error { .. }) => (),
+            _ => panic!("Did not encounter expected error."),
+        };
+    };
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn makeflags_valid() {
+        let result = parse_makeflags("-j --jobserver-fds=3,4 --jobserver-auth=3,4");
+        let (read_fd, write_fd) = result.unwrap();
+        assert_eq!(read_fd, 3);
+        assert_eq!(write_fd, 4);
+    }
+
+    #[test]
+    fn makeflags_empty() {
+        let result = parse_makeflags("");
+        assert_error!(result, RegexMatch);
+    }
+
+    #[test]
+    fn makeflags_mismatched() {
+        let result = parse_makeflags("-j --jobserver-fds=3,4 --jobserver-auth=5,4");
+        assert_error!(result, FileDescriptorMismatch);
+
+        let result = parse_makeflags("-j --jobserver-fds=3,4 --jobserver-auth=3,5");
+        assert_error!(result, FileDescriptorMismatch);
+    }
+
+    #[test]
+    fn makeflags_out_of_range() {
+        let fd = u64::MAX;
+
+        let input = format!("-j --jobserver-fds={fd},4 --jobserver-auth={fd},4");
+        let result = parse_makeflags(input);
+        assert_error!(result, FileDescriptorParse);
+
+        let input = format!("-j --jobserver-fds=3,{fd} --jobserver-auth=3,{fd}");
+        let result = parse_makeflags(input);
+        assert_error!(result, FileDescriptorParse);
     }
 }

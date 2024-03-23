@@ -14,6 +14,7 @@ clap = { version = "4", features = ["derive", "env"] }
 duct = "0.13"
 hex = "0.4"
 lazy_static = "1"
+pipesys = { version = "0.1", path = "../pipesys" }
 rand = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
 regex = "1"
 reqwest = { version = "0.11", default-features = false, features = ["rustls-tls", "blocking"] }
@@ -21,6 +22,7 @@ serde = { version = "1", features = ["derive"] }
 serde_plain = "1"
 sha2 = "0.10"
 snafu = "0.8"
+tokio = { version = "1.32.0", features = ["fs", "macros", "rt-multi-thread"] }
 toml = "0.8"
 url = { version = "2", features = ["serde"] }
 walkdir = "2"
