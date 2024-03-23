@@ -137,13 +137,14 @@ RUN --mount=target=/host \
         --no-database \
         /host/build/rpms \
     && cp .rpmmacros /etc/rpm/macros \
-    && dnf -y \
-        --disablerepo '*' \
-        --repofrompath repo,./rpmbuild/RPMS \
-        --enablerepo 'repo' \
-        --nogpgcheck \
-        --forcearch "${ARCH}" \
-        builddep rpmbuild/SPECS/${PACKAGE}.spec
+    && /host/build/tools/unplug \
+        dnf -y \
+            --disablerepo '*' \
+            --repofrompath repo,./rpmbuild/RPMS \
+            --enablerepo 'repo' \
+            --nogpgcheck \
+            --forcearch "${ARCH}" \
+            builddep rpmbuild/SPECS/${PACKAGE}.spec
 
 # Ensure that the target binutils that `find-debuginfo.sh` uses are present in $PATH.
 ENV PATH="/usr/${ARCH}-bottlerocket-linux-gnu/debuginfo/bin:${PATH}"
@@ -151,14 +152,20 @@ ENV PATH="/usr/${ARCH}-bottlerocket-linux-gnu/debuginfo/bin:${PATH}"
 # We use the "nocache" writable space to generate code where necessary, like the variant-
 # specific models.
 USER builder
-RUN --mount=source=.cargo,target=/home/builder/.cargo \
+ARG JOBS_SOCKET
+RUN --mount=target=/host \
+    --mount=source=.cargo,target=/home/builder/.cargo \
     --mount=type=cache,target=/home/builder/.cache,from=cache,source=/cache \
     --mount=type=cache,target=/home/builder/rpmbuild/BUILD/sources/models/src/variant,from=variantcache,source=/variantcache \
     --mount=source=sources,target=/home/builder/rpmbuild/BUILD/sources \
-    rpmbuild -ba --clean \
-      --undefine _auto_set_build_flags \
-      --define "_target_cpu ${ARCH}" \
-      rpmbuild/SPECS/${PACKAGE}.spec
+    /host/build/tools/pipesys make --fd-socket "${JOBS_SOCKET}" \
+        /host/build/tools/unplug \
+            rpmbuild -ba --clean \
+                --undefine _auto_set_build_flags \
+                --define "_target_cpu ${ARCH}" \
+                --define "make_build %{__make} %{_make_output_sync} %{_make_verbose}" \
+                --define "make_install MAKEFLAGS= %{__make} install DESTDIR=%{?buildroot} INSTALL=\"%{__install} -p\"" \
+                rpmbuild/SPECS/${PACKAGE}.spec
 
 # =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^=
 # Copies RPM packages from the previous stage to their expected location so that buildsys

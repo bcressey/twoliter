@@ -3688,6 +3688,7 @@ dependencies = [
  "hex",
  "log",
  "non-empty-string",
+ "pipesys",
  "pubsys",
  "pubsys-setup",
  "serde",
@@ -3699,6 +3700,7 @@ dependencies = [
  "tokio",
  "toml",
  "tuftool",
+ "unplug",
  "uuid",
 ]
 

@@ -95,7 +95,7 @@ BUILDSYS_ALLOW_FAILED_LICENSE_CHECK = "false"
 BUILDSYS_UPSTREAM_LICENSE_FETCH= "false"
 
 # This controls how many `docker build` commands we'll invoke at once.
-BUILDSYS_JOBS = "8"
+BUILDSYS_JOBS = { script = ['echo "${BUILDSYS_JOBS:-$( n=$(( $(nproc) * 1 )) ; echo $n )}"'] }
 
 CARGO_HOME = "${BUILDSYS_ROOT_DIR}/.cargo"
 # This needs to end with pkg/mod so that we can mount the parent of pkg/mod as GOPATH.
