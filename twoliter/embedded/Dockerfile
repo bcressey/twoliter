@@ -116,26 +116,27 @@ RUN --mount=target=/host \
   && ( [ -d /host/licenses ] \
   && cp -r /host/licenses ./rpmbuild/BUILD/ \
   || mkdir ./rpmbuild/BUILD/licenses )
-COPY ./packages/${PACKAGE}/ .
+COPY ./packages/${PACKAGE}/${PACKAGE}.spec .
 
 COPY --chown=builder --from=rpm-macros-and-bconds /home/builder/generated.* .
 
-# Merge generated bconds with the package spec, and put sources in the right place.
+# Merge generated bconds with the package spec.
 RUN \
    cat "/usr/lib/rpm/platform/${ARCH}-bottlerocket/macros" generated.rpmmacros > .rpmmacros \
    && cat generated.bconds ${PACKAGE}.spec >> rpmbuild/SPECS/${PACKAGE}.spec \
-   && find . -maxdepth 1 -not -path '*/\.*' -type f -exec mv {} rpmbuild/SOURCES/ \; \
    && echo ${NOCACHE}
 
 USER root
+ARG BYPASS_SOCKET
 RUN --mount=target=/host \
-    ln -s /host/build/rpms/*.rpm ./rpmbuild/RPMS \
+    /host/build/tools/pipesys link --fd-socket "${BYPASS_SOCKET}" --target /bypass \
+    && ln -s /bypass/build/rpms/*.rpm ./rpmbuild/RPMS \
     && createrepo_c \
         -o ./rpmbuild/RPMS \
         -x '*-debuginfo-*.rpm' \
         -x '*-debugsource-*.rpm' \
         --no-database \
-        /host/build/rpms \
+        /bypass/build/rpms \
     && cp .rpmmacros /etc/rpm/macros \
     && /host/build/tools/unplug \
         dnf -y \
@@ -144,7 +145,13 @@ RUN --mount=target=/host \
             --enablerepo 'repo' \
             --nogpgcheck \
             --forcearch "${ARCH}" \
-            builddep rpmbuild/SPECS/${PACKAGE}.spec
+            builddep rpmbuild/SPECS/${PACKAGE}.spec \
+    && find "/bypass/packages/${PACKAGE}" \
+      -maxdepth 1 \
+      -not -path '*/\.*' \
+      -type f \
+      -exec cp {} ./rpmbuild/SOURCES/ \; \
+    && rm /bypass
 
 # Ensure that the target binutils that `find-debuginfo.sh` uses are present in $PATH.
 ENV PATH="/usr/${ARCH}-bottlerocket-linux-gnu/debuginfo/bin:${PATH}"
@@ -202,9 +209,11 @@ RUN --mount=target=/host \
 
 WORKDIR /root
 USER root
+ARG BYPASS_SOCKET
 RUN --mount=target=/host \
-    mkdir -p /local/rpms ./rpmbuild/RPMS \
-    && ln -s /host/build/rpms/*.rpm ./rpmbuild/RPMS \
+    /host/build/tools/pipesys link --fd-socket "${BYPASS_SOCKET}" --target /bypass \
+    && mkdir -p /local/rpms ./rpmbuild/RPMS \
+    && ln -s /bypass/build/rpms/*.rpm ./rpmbuild/RPMS \
     && ln -s /home/builder/rpmbuild/RPMS/*/*.rpm ./rpmbuild/RPMS \
     && createrepo_c \
         -o ./rpmbuild/RPMS \
@@ -224,6 +233,7 @@ RUN --mount=target=/host \
         install $(printf "bottlerocket-%s\n" metadata ${PACKAGES}) \
     && mv *.rpm /local/rpms \
     && createrepo_c /local/rpms \
+    && rm /bypass \
     && echo ${NOCACHE}
 
 # =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^=
@@ -289,19 +299,22 @@ ARG VERSION_ID
 ARG BUILD_ID
 ARG NOCACHE
 ARG VARIANT
+ARG BYPASS_SOCKET
 ENV VARIANT=${VARIANT} VERSION_ID=${VERSION_ID} BUILD_ID=${BUILD_ID}
 WORKDIR /root
 
 USER root
 RUN --mount=target=/host \
-    mkdir -p /local/migrations \
-    && find /host/build/rpms/ -maxdepth 1 -type f \
+    /host/build/tools/pipesys link --fd-socket "${BYPASS_SOCKET}" --target /bypass \
+    && mkdir -p /local/migrations \
+    && find /bypass/build/rpms/ -maxdepth 1 -type f \
         -name "bottlerocket-migrations-*.rpm" \
         -not -iname '*debuginfo*' \
         -exec cp '{}' '/local/migrations/' ';' \
     && /host/build/tools/rpm2migrations \
         --package-dir=/local/migrations \
         --output-dir=/local/output \
+    && rm /bypass \
     && echo ${NOCACHE}
 
 # =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^=
@@ -313,21 +326,24 @@ ARG VERSION_ID
 ARG BUILD_ID
 ARG NOCACHE
 ARG VARIANT
+ARG BYPASS_SOCKET
 ENV VARIANT=${VARIANT} VERSION_ID=${VERSION_ID} BUILD_ID=${BUILD_ID}
 
 USER root
 
 WORKDIR /tmp
 RUN --mount=target=/host \
-    mkdir -p /local/archives \
+    /host/build/tools/pipesys link --fd-socket "${BYPASS_SOCKET}" --target /bypass \
+    && mkdir -p /local/archives \
     && KERNEL="$(printf "%s\n" ${PACKAGES} | awk '/^kernel-/{print $1}')" \
-    && find /host/build/rpms/ -maxdepth 1 -type f \
+    && find /bypass/build/rpms/ -maxdepth 1 -type f \
         -name "bottlerocket-${KERNEL}-archive-*.rpm" \
         -exec cp '{}' '/local/archives/' ';' \
     && /host/build/tools/rpm2kmodkit \
         --archive-dir=/local/archives \
         --toolchain-dir=/toolchain \
         --output-dir=/local/output \
+    && rm /bypass \
     && echo ${NOCACHE}
 
 # =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^=
