@@ -45,14 +45,15 @@ popd >/dev/null
 
 # Merge them together into a unified archive.
 pushd "${KIT_DIR}" >/dev/null
+rm -f "${OUTPUT_DIR}/${KMOD_KIT_FULL}.tar"
 tar cf "${OUTPUT_DIR}/${KMOD_KIT_FULL}.tar" "${KMOD_KIT}"
-xz -T0 "${OUTPUT_DIR}/${KMOD_KIT_FULL}.tar"
+xz -f -T0 "${OUTPUT_DIR}/${KMOD_KIT_FULL}.tar"
 popd >/dev/null
 
 # Create friendly symlinks.
-ln -s "${KMOD_KIT_FULL}.tar.xz" "${OUTPUT_DIR}/${KMOD_KIT_FRIENDLY_VERSIONED_SYMLINK}.tar.xz"
-ln -s "${KMOD_KIT_FULL}.tar.xz" "${OUTPUT_DIR}/${KMOD_KIT_VERSIONED_SYMLINK}.tar.xz"
-ln -s "${KMOD_KIT_FULL}.tar.xz" "${OUTPUT_DIR}/${KMOD_KIT_SYMLINK}.tar.xz"
-ln -s "${KMOD_KIT_FULL}.tar.xz" "${OUTPUT_DIR}/${KMOD_KIT}.tar.xz"
+ln -snf "${KMOD_KIT_FULL}.tar.xz" "${OUTPUT_DIR}/${KMOD_KIT_FRIENDLY_VERSIONED_SYMLINK}.tar.xz"
+ln -snf "${KMOD_KIT_FULL}.tar.xz" "${OUTPUT_DIR}/${KMOD_KIT_VERSIONED_SYMLINK}.tar.xz"
+ln -snf "${KMOD_KIT_FULL}.tar.xz" "${OUTPUT_DIR}/${KMOD_KIT_SYMLINK}.tar.xz"
+ln -snf "${KMOD_KIT_FULL}.tar.xz" "${OUTPUT_DIR}/${KMOD_KIT}.tar.xz"
 
 rm -rf "${EXTRACT_DIR}" "${KIT_DIR}"

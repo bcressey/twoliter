@@ -701,7 +701,7 @@ symlink_image() {
   target="${what^^}_NAME"
   for link in symlink versioned_symlink friendly_versioned_symlink ; do
     link="${what^^}_${link^^}"
-    ln -s "${!target}${ext}" "${OUTPUT_DIR}/${!link}${ext}"
+    ln -snf "${!target}${ext}" "${OUTPUT_DIR}/${!link}${ext}"
   done
 }
 

@@ -174,11 +174,21 @@ RUN --mount=target=/host \
                 --define "make_install MAKEFLAGS= %{__make} install DESTDIR=%{?buildroot} INSTALL=\"%{__install} -p\"" \
                 rpmbuild/SPECS/${PACKAGE}.spec
 
+# Copies RPM packages to the output directory that buildsys expects.
+USER root
+ARG OUTPUT_SOCKET
+RUN --mount=target=/host \
+    /host/build/tools/pipesys link --fd-socket "${OUTPUT_SOCKET}" --target /output \
+    && cp /home/builder/rpmbuild/RPMS/*/*.rpm /output/ \
+    && chown -R 1000:1000 /output/ \
+    && rm /output \
+    && touch /.${NOCACHE}
+
 # =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^=
-# Copies RPM packages from the previous stage to their expected location so that buildsys
-# can find them and copy them out.
+# Finish up the package build stage.
 FROM scratch AS package
-COPY --from=rpmbuild /home/builder/rpmbuild/RPMS/*/*.rpm /output/
+ARG NOCACHE
+COPY --from=rpmbuild /.${NOCACHE} /
 
 ############################################################################################
 # Section 2: The following build stages are used to create a Bottlerocket image once all of
@@ -243,6 +253,7 @@ ARG ARCH
 ARG VERSION_ID
 ARG BUILD_ID
 ARG NOCACHE
+ARG OUTPUT_SOCKET
 ARG VARIANT
 ARG PRETTY_NAME
 ARG IMAGE_NAME
@@ -276,20 +287,23 @@ RUN --mount=target=/host \
     --mount=type=secret,id=aws-access-key-id.env,target=/root/.aws/aws-access-key-id.env \
     --mount=type=secret,id=aws-secret-access-key.env,target=/root/.aws/aws-secret-access-key.env \
     --mount=type=secret,id=aws-session-token.env,target=/root/.aws/aws-session-token.env \
-    /host/build/tools/rpm2img \
-      --package-dir=/local/rpms \
-      --output-dir=/local/output \
-      --output-fmt="${IMAGE_FORMAT}" \
-      --os-image-size-gib="${OS_IMAGE_SIZE_GIB}" \
-      --data-image-size-gib="${DATA_IMAGE_SIZE_GIB}" \
-      --os-image-publish-size-gib="${OS_IMAGE_PUBLISH_SIZE_GIB}" \
-      --data-image-publish-size-gib="${DATA_IMAGE_PUBLISH_SIZE_GIB}" \
-      --partition-plan="${PARTITION_PLAN}" \
-      --ovf-template="/host/variants/${VARIANT}/template.ovf" \
-      ${XFS_DATA_PARTITION:+--xfs-data-partition=yes} \
-      ${GRUB_SET_PRIVATE_VAR:+--with-grub-set-private-var=yes} \
-      ${UEFI_SECURE_BOOT:+--with-uefi-secure-boot=yes} \
-    && echo ${NOCACHE}
+    /host/build/tools/pipesys link --fd-socket "${OUTPUT_SOCKET}" --target /output \
+    && /host/build/tools/rpm2img \
+        --package-dir=/local/rpms \
+        --output-dir=/output \
+        --output-fmt="${IMAGE_FORMAT}" \
+        --os-image-size-gib="${OS_IMAGE_SIZE_GIB}" \
+        --data-image-size-gib="${DATA_IMAGE_SIZE_GIB}" \
+        --os-image-publish-size-gib="${OS_IMAGE_PUBLISH_SIZE_GIB}" \
+        --data-image-publish-size-gib="${DATA_IMAGE_PUBLISH_SIZE_GIB}" \
+        --partition-plan="${PARTITION_PLAN}" \
+        --ovf-template="/host/variants/${VARIANT}/template.ovf" \
+        ${XFS_DATA_PARTITION:+--xfs-data-partition=yes} \
+        ${GRUB_SET_PRIVATE_VAR:+--with-grub-set-private-var=yes} \
+        ${UEFI_SECURE_BOOT:+--with-uefi-secure-boot=yes} \
+    && chown -R 1000:1000 /output/ \
+    && rm /output \
+    && touch /.${NOCACHE}
 
 # =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^=
 # Creates an archive of the datastore migrations.
@@ -300,12 +314,14 @@ ARG BUILD_ID
 ARG NOCACHE
 ARG VARIANT
 ARG BYPASS_SOCKET
+ARG OUTPUT_SOCKET
 ENV VARIANT=${VARIANT} VERSION_ID=${VERSION_ID} BUILD_ID=${BUILD_ID}
 WORKDIR /root
 
 USER root
 RUN --mount=target=/host \
     /host/build/tools/pipesys link --fd-socket "${BYPASS_SOCKET}" --target /bypass \
+    && /host/build/tools/pipesys link --fd-socket "${OUTPUT_SOCKET}" --target /output \
     && mkdir -p /local/migrations \
     && find /bypass/build/rpms/ -maxdepth 1 -type f \
         -name "bottlerocket-migrations-*.rpm" \
@@ -313,9 +329,11 @@ RUN --mount=target=/host \
         -exec cp '{}' '/local/migrations/' ';' \
     && /host/build/tools/rpm2migrations \
         --package-dir=/local/migrations \
-        --output-dir=/local/output \
+        --output-dir=/output \
+    && chown -R 1000:1000 /output/ \
+    && rm /output \
     && rm /bypass \
-    && echo ${NOCACHE}
+    && touch /.${NOCACHE}
 
 # =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^=
 # Creates an archive of kernel development sources and toolchain.
@@ -327,6 +345,7 @@ ARG BUILD_ID
 ARG NOCACHE
 ARG VARIANT
 ARG BYPASS_SOCKET
+ARG OUTPUT_SOCKET
 ENV VARIANT=${VARIANT} VERSION_ID=${VERSION_ID} BUILD_ID=${BUILD_ID}
 
 USER root
@@ -334,6 +353,7 @@ USER root
 WORKDIR /tmp
 RUN --mount=target=/host \
     /host/build/tools/pipesys link --fd-socket "${BYPASS_SOCKET}" --target /bypass \
+    && /host/build/tools/pipesys link --fd-socket "${OUTPUT_SOCKET}" --target /output \
     && mkdir -p /local/archives \
     && KERNEL="$(printf "%s\n" ${PACKAGES} | awk '/^kernel-/{print $1}')" \
     && find /bypass/build/rpms/ -maxdepth 1 -type f \
@@ -342,14 +362,16 @@ RUN --mount=target=/host \
     && /host/build/tools/rpm2kmodkit \
         --archive-dir=/local/archives \
         --toolchain-dir=/toolchain \
-        --output-dir=/local/output \
+        --output-dir=/output \
+    && chown -R 1000:1000 /output/ \
+    && rm /output \
     && rm /bypass \
-    && echo ${NOCACHE}
+    && touch /.${NOCACHE}
 
 # =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^=
-# Copies the build artifacts (Bottlerocket image files, migrations, and kmod kit) to their
-# expected location so that buildsys can find them and copy them out.
+# Finish up the variant build stage.
 FROM scratch AS variant
-COPY --from=imgbuild /local/output/. /output/
-COPY --from=migrationbuild /local/output/. /output/
-COPY --from=kmodkitbuild /local/output/. /output/
+ARG NOCACHE
+COPY --from=imgbuild /.${NOCACHE} /
+COPY --from=migrationbuild /.${NOCACHE} /
+COPY --from=kmodkitbuild /.${NOCACHE} /

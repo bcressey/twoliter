@@ -86,8 +86,9 @@ lazy_static! {
 
 static DOCKER_BUILD_MAX_ATTEMPTS: NonZeroU16 = nonzero!(10u16);
 
-// Expected UID for unprivileged processes inside the build container.
+// Expected UID for privileged and unprivileged processes inside the build container.
 const BUILDER_UID: u32 = 1000;
+const ROOT_UID: u32 = 0;
 
 // `cargo` passes the jobserver file descriptors through this environment variable.
 const CARGO_MAKEFLAGS: &str = "CARGO_MAKEFLAGS";
@@ -98,6 +99,7 @@ struct CommonBuildArgs {
     nocache: String,
     token: String,
     jobs_socket: String,
+    output_socket: String,
 }
 
 impl CommonBuildArgs {
@@ -105,10 +107,14 @@ impl CommonBuildArgs {
         let token = token(&root);
 
         // Avoid using a cached layer from a previous build.
-        let nocache = rand::thread_rng().gen::<u32>().to_string();
+        let nocache = rand::thread_rng().gen::<u128>().to_string();
 
         // Generate a unique address for the socket that sends jobserver file descriptors.
         let jobs_socket = format!("buildsys-jobserver-{token}-{nocache}");
+
+        // Generate a unique address for the socket that sends the output directory file
+        // descriptor.
+        let output_socket = format!("buildsys-output-{token}-{nocache}");
 
         Self {
             arch,
@@ -116,6 +122,7 @@ impl CommonBuildArgs {
             nocache,
             token,
             jobs_socket,
+            output_socket,
         }
     }
 }
@@ -401,46 +408,48 @@ impl DockerBuild {
             --init \
             --net host \
             --pid host \
-            -u 0 \
+            -u {uid} \
             -v {root}:/bypass:ro \
             -v {root}/build/tools/pipesys:/usr/local/bin/pipesys:ro \
             {sdk} \
-            pipesys serve --socket {tag}-bypass --client-uid 0 --path /bypass",
+            pipesys serve --socket {tag}-bypass --client-uid {uid} --path /bypass",
             tag = self.tag,
             root = self.root_dir.display(),
             sdk = self.common_build_args.sdk,
+            uid = ROOT_UID,
         )
         .split_string();
 
         let rm_bypass = format!("rm --force {}-bypass", self.tag).split_string();
+        let rm_image = format!("rmi --force {}", self.tag).split_string();
 
-        // Helper inputs for the build container.
-        let create = format!("create --name {} {} true", self.tag, self.tag).split_string();
-        let cp = format!("cp {}:/output/. {}", self.tag, marker_dir.display()).split_string();
-        let rm = format!("rm --force {}", self.tag).split_string();
-        let rmi = format!("rmi --force {}", self.tag).split_string();
+        // Clean up the previous image if it exists.
+        let _ = docker(&rm_image, Retry::No);
 
         // Clean up the stopped bypass container if it exists.
         let _ = docker(&rm_bypass, Retry::No);
-
-        // Clean up the stopped build container if it exists.
-        let _ = docker(&rm, Retry::No);
-
-        // Clean up the previous image if it exists.
-        let _ = docker(&rmi, Retry::No);
 
         // Get the jobserver file descriptors for pipesys to serve.
         let cargo_makeflags = env::var(CARGO_MAKEFLAGS).context(error::EnvironmentSnafu {
             var: CARGO_MAKEFLAGS,
         })?;
         let (read_fd, write_fd) = parse_makeflags(cargo_makeflags)?;
-        let jobs_socket = self.common_build_args.jobs_socket.clone();
 
         let runtime = tokio::runtime::Runtime::new().context(error::AsyncRuntimeSnafu)?;
 
         // Spawn a background task to share the file descriptors for cargo's jobserver.
+        let jobs_socket = self.common_build_args.jobs_socket.clone();
         runtime.spawn(async move {
             PipesysServer::for_fds(jobs_socket, BUILDER_UID, &[read_fd, write_fd])
+                .serve()
+                .await
+        });
+
+        // Spawn a background task to share the file descriptors for the output directory.
+        let output_socket = self.common_build_args.output_socket.clone();
+        let output_dir = marker_dir.clone();
+        runtime.spawn(async move {
+            PipesysServer::for_paths(output_socket, ROOT_UID, &[output_dir])
                 .serve()
                 .await
         });
@@ -475,17 +484,8 @@ impl DockerBuild {
         // Check whether the build succeeded before continuing.
         build_result?;
 
-        // Create a stopped container so we can copy artifacts out.
-        docker(&create, Retry::No)?;
-
-        // Copy artifacts into our output directory.
-        docker(&cp, Retry::No)?;
-
-        // Clean up our stopped container after copying artifacts out.
-        docker(&rm, Retry::No)?;
-
         // Clean up our image now that we're done.
-        docker(&rmi, Retry::No)?;
+        docker(&rm_image, Retry::No)?;
 
         // Copy artifacts to the expected directory and write markers to track them.
         copy_build_files(&marker_dir, &self.artifacts_dir)?;
@@ -504,6 +504,7 @@ impl DockerBuild {
         args.build_arg("NOCACHE", &self.common_build_args.nocache);
         args.build_arg("TOKEN", &self.common_build_args.token);
         args.build_arg("JOBS_SOCKET", &self.common_build_args.jobs_socket);
+        args.build_arg("OUTPUT_SOCKET", &self.common_build_args.output_socket);
         args
     }
 }
