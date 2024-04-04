@@ -146,6 +146,11 @@ RUN --mount=target=/host \
             --nogpgcheck \
             --forcearch "${ARCH}" \
             builddep rpmbuild/SPECS/${PACKAGE}.spec \
+    && for libc in gnu musl ; do \
+         for cc in cc gcc c++ g++ ; do \
+           ln -s ../../bin/ccache /usr/lib64/ccache/${ARCH}-bottlerocket-linux-${libc}-${cc} ; \
+          done ; \
+       done \
     && find "/bypass/packages/${PACKAGE}" \
       -maxdepth 1 \
       -not -path '*/\.*' \
@@ -165,14 +170,17 @@ RUN --mount=target=/host \
     --mount=type=cache,target=/home/builder/.cache,from=cache,source=/cache \
     --mount=type=cache,target=/home/builder/rpmbuild/BUILD/sources/models/src/variant,from=variantcache,source=/variantcache \
     --mount=source=sources,target=/home/builder/rpmbuild/BUILD/sources \
-    /host/build/tools/pipesys make --fd-socket "${JOBS_SOCKET}" \
-        /host/build/tools/unplug \
+    export PATH="/usr/lib64/ccache:${PATH}" \
+    && ccache --zero-stats \
+    && /host/build/tools/pipesys make --fd-socket "${JOBS_SOCKET}" \
+       /host/build/tools/unplug \
             rpmbuild -ba --clean \
                 --undefine _auto_set_build_flags \
                 --define "_target_cpu ${ARCH}" \
                 --define "make_build %{__make} %{_make_output_sync} %{_make_verbose}" \
                 --define "make_install MAKEFLAGS= %{__make} install DESTDIR=%{?buildroot} INSTALL=\"%{__install} -p\"" \
-                rpmbuild/SPECS/${PACKAGE}.spec
+                rpmbuild/SPECS/${PACKAGE}.spec \
+    && ccache --show-stats
 
 # Copies RPM packages to the output directory that buildsys expects.
 USER root
