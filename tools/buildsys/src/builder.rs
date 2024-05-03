@@ -283,6 +283,14 @@ impl DockerBuild {
 
     /// Create a new `DockerBuild` that can build a variant image.
     pub(crate) fn new_variant(args: BuildVariantArgs, manifest: &ManifestInfo) -> Result<Self> {
+        let package = if let Some(name_override) = manifest.package_name() {
+            name_override.clone()
+        } else {
+            args.cargo_package_name
+        };
+
+        let per_kit_dir = format!("{}/build/kits/{}", args.common.root_dir.display(), package).into();
+
         let image_layout = manifest.image_layout().cloned().unwrap_or_default();
         let ImageLayout {
             os_image_size_gib,
@@ -307,7 +315,7 @@ impl DockerBuild {
                 &args.common.root_dir,
             ),
             root_dir: args.common.root_dir.clone(),
-            artifacts_dir: args.common.image_arch_variant_dir,
+            artifacts_dir: per_kit_dir,
             state_dir: args.common.state_dir,
             artifact_name: args.variant.clone(),
             common_build_args: CommonBuildArgs::new(

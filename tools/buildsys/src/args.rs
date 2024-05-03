@@ -152,6 +152,9 @@ pub(crate) struct BuildVariantArgs {
     #[arg(long, env = "BUILDSYS_VERSION_IMAGE")]
     pub(crate) version_image: String,
 
+    #[arg(long, env = "CARGO_PKG_NAME")]
+    pub(crate) cargo_package_name: String,
+
     #[command(flatten)]
     pub(crate) common: Common,
 }
