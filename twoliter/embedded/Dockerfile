@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1.4.3
-# This Dockerfile has two sections which are used to build rpm.spec packages and to create
-# Bottlerocket images, respectively. They are marked as Section 1 and Section 2. buildsys
-# uses Section 1 during build-package calls and Section 2 during build-variant calls.
+# This Dockerfile has three sections which are used to build rpm.spec packages, to create
+# kits, and to create Bottlerocket images, respectively. They are marked as Sections 1-3.
+# buildsys uses Section 1 during build-package calls, Section 2 during build-kit calls,
+# and Section 3 during build-variant calls.
 #
 # Several commands start with RUN --mount=target=/host, which mounts the docker build
 # context (which in practice is the root of the Bottlerocket repository) as a read-only
@@ -129,18 +130,26 @@ RUN \
 
 USER root
 RUN --mount=target=/host \
-    ln -s /host/build/rpms/*.rpm ./rpmbuild/RPMS \
-    && createrepo_c \
+    for pkg in ${PACKAGES} ; do \
+      ln -s /host/build/rpms/${pkg}/*.rpm ./rpmbuild/RPMS ; \
+    done && \
+    createrepo_c \
         -o ./rpmbuild/RPMS \
         -x '*-debuginfo-*.rpm' \
         -x '*-debugsource-*.rpm' \
         --no-database \
-        /host/build/rpms \
-    && cp .rpmmacros /etc/rpm/macros \
-    && dnf -y \
+        ./rpmbuild/RPMS && \
+    cp .rpmmacros /etc/rpm/macros && \
+    declare -a KIT_REPOS && \
+    for kit in ${KITS} ; do \
+      KIT_REPOS+=("--repofrompath=${kit},/host/build/kits/${kit}/${ARCH}" --enablerepo "${kit}") ; \
+    done && \
+    echo "${KIT_REPOS[@]}" && \
+    dnf -y \
         --disablerepo '*' \
         --repofrompath repo,./rpmbuild/RPMS \
         --enablerepo 'repo' \
+        "${KIT_REPOS[@]}" \
         --nogpgcheck \
         --forcearch "${ARCH}" \
         builddep rpmbuild/SPECS/${PACKAGE}.spec
@@ -167,11 +176,41 @@ FROM scratch AS package
 COPY --from=rpmbuild /home/builder/rpmbuild/RPMS/*/*.rpm /output/
 
 ############################################################################################
-# Section 2: The following build stages are used to create a Bottlerocket image once all of
-# the rpm files have been created by repeatedly using Section 1.
+# Section 2: The following build stages are used to create a Bottlerocket kit once all of
+# the rpm files have been created by repeatedly using Section 1. This process can occur more
+# than once because packages can depend on kits and those kits depend on packages that must
+# be built first.
 
 # =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^=
-# Creates an RPM repository from packages created in Section 1.
+# Builds a kit from RPM packages.
+FROM sdk AS kitbuild
+ARG KIT
+ARG PACKAGES
+ARG ARCH
+ARG NOCACHE
+
+WORKDIR /home/builder
+USER builder
+
+RUN --mount=target=/host \
+    /host/build/tools/rpm2kit \
+        --packages-dir=/host/build/rpms \
+        --arch="${ARCH}" \
+        "${PACKAGES[@]/#/--package=}" \
+        --output-dir=/home/builder/output \
+    && echo ${NOCACHE}
+
+# Copies kit artifacts from the previous stage to their expected location so that buildsys
+# can find them and copy them out.
+FROM scratch AS kit
+COPY --from=kitbuild /home/builder/output/. /output/
+
+############################################################################################
+# Section 3: The following build stages are used to create a Bottlerocket image once all of
+# the rpm files have been created by repeatedly using Sections 1 and 2.
+
+# =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^=
+# Creates an RPM repository from packages created in Section 1 and kits from Section 2.
 FROM sdk AS repobuild
 ARG PACKAGES
 ARG ARCH
@@ -196,28 +235,35 @@ RUN --mount=target=/host \
 WORKDIR /root
 USER root
 RUN --mount=target=/host \
-    mkdir -p /local/rpms ./rpmbuild/RPMS \
-    && ln -s /host/build/rpms/*.rpm ./rpmbuild/RPMS \
-    && ln -s /home/builder/rpmbuild/RPMS/*/*.rpm ./rpmbuild/RPMS \
-    && createrepo_c \
+    for pkg in ${PACKAGES} ; do \
+      ln -s /host/build/rpms/${pkg}/*.rpm ./rpmbuild/RPMS ; \
+    done && \
+    ln -s /home/builder/rpmbuild/RPMS/*/*.rpm ./rpmbuild/RPMS && \
+    createrepo_c \
         -o ./rpmbuild/RPMS \
         -x '*-debuginfo-*.rpm' \
         -x '*-debugsource-*.rpm' \
         --no-database \
-        ./rpmbuild/RPMS \
-    && echo '%_dbpath %{_sharedstatedir}/rpm' >> /etc/rpm/macros \
-    && dnf -y \
+        ./rpmbuild/RPMS && \
+    echo '%_dbpath %{_sharedstatedir}/rpm' >> /etc/rpm/macros && \
+    declare -a KIT_REPOS && \
+    for kit in ${KITS} ; do \
+      KIT_REPOS+=("--repofrompath=${kit},/host/build/kits/${kit}/${ARCH}" --enablerepo "${kit}") \
+    done && \
+    dnf -y \
         --disablerepo '*' \
         --repofrompath repo,./rpmbuild/RPMS \
         --enablerepo 'repo' \
+        "${KIT_REPOS[@]}" \
         --nogpgcheck \
         --downloadonly \
         --downloaddir . \
         --forcearch "${ARCH}" \
-        install $(printf "bottlerocket-%s\n" metadata ${PACKAGES}) \
-    && mv *.rpm /local/rpms \
-    && createrepo_c /local/rpms \
-    && echo ${NOCACHE}
+        install $(printf "bottlerocket-%s\n" metadata ${PACKAGES}) && \
+    mkdir -p /local/rpms && \
+    mv *.rpm /local/rpms && \
+    createrepo_c /local/rpms && \
+    echo ${NOCACHE}
 
 # =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^=
 # Builds a Bottlerocket image.
