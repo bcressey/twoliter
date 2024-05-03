@@ -1,11 +1,4 @@
 [licenses]
-unlicensed = "deny"
-
-# Deny licenses unless they are specifically listed here
-copyleft = "deny"
-allow-osi-fsf-free = "neither"
-default = "deny"
-
 # We want really high confidence when inferring licenses from text
 confidence-threshold = 0.93
 
@@ -31,7 +24,7 @@ exceptions = []
 multiple-versions = "deny"
 wildcards = "deny"
 
-deny = [{ name = "structopt" }, { name = "clap", wrappers = ["cargo-readme"] }]
+deny = []
 
 skip = []
 

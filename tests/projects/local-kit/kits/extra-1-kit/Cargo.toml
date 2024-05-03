@@ -7,7 +7,8 @@ build = "../build.rs"
 # Don't rebuild crate just because of changes to README.
 exclude = ["README.md"]
 
-[package.metadata.build-kit]
+# HACK: this should be build-kit but I am cheating
+[package.metadata.build-variant]
 included-packages = [
     "pkg-b",
     "pkg-d",
