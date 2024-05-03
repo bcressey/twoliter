@@ -128,9 +128,19 @@ RUN \
    && find . -maxdepth 1 -not -path '*/\.*' -type f -exec mv {} rpmbuild/SOURCES/ \; \
    && echo ${NOCACHE}
 
+## FIXME: move this up with other ARGs
+#ARG PACKAGES
+#ARG KITS
+## FIXME: set this via buildsys
+ENV PACKAGES="pkg-a pkg-b pkg-c pkg-d pkg-e"
+## FIXME: and also this
+ENV KITS="core-kit extra-1-kit extra-2-kit extra-3-kit"
+
 USER root
 RUN --mount=target=/host \
     for pkg in ${PACKAGES} ; do \
+      # FIXME: remove this check, this dir should always exist \
+      [ -d "/host/build/rpms/${pkg}" ] || continue ; \
       ln -s /host/build/rpms/${pkg}/*.rpm ./rpmbuild/RPMS ; \
     done && \
     createrepo_c \
@@ -142,6 +152,8 @@ RUN --mount=target=/host \
     cp .rpmmacros /etc/rpm/macros && \
     declare -a KIT_REPOS && \
     for kit in ${KITS} ; do \
+      # FIXME: remove this check, this should also always exist \
+      [ -s "/host/build/kits/${kit}/${ARCH}/repodata/repomd.xml" ] || continue ; \
       KIT_REPOS+=("--repofrompath=${kit},/host/build/kits/${kit}/${ARCH}" --enablerepo "${kit}") ; \
     done && \
     echo "${KIT_REPOS[@]}" && \
@@ -162,7 +174,6 @@ ENV PATH="/usr/${ARCH}-bottlerocket-linux-gnu/debuginfo/bin:${PATH}"
 USER builder
 RUN --mount=source=.cargo,target=/home/builder/.cargo \
     --mount=type=cache,target=/home/builder/.cache,from=cache,source=/cache \
-    --mount=type=cache,target=/home/builder/rpmbuild/BUILD/sources/models/src/variant,from=variantcache,source=/variantcache \
     --mount=source=sources,target=/home/builder/rpmbuild/BUILD/sources \
     rpmbuild -ba --clean \
       --undefine _auto_set_build_flags \
@@ -184,10 +195,14 @@ COPY --from=rpmbuild /home/builder/rpmbuild/RPMS/*/*.rpm /output/
 # =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^=
 # Builds a kit from RPM packages.
 FROM sdk AS kitbuild
-ARG KIT
 ARG PACKAGES
 ARG ARCH
 ARG NOCACHE
+
+## FIXME: this should be passed by buildsys
+#ARG KIT
+ARG VARIANT
+ENV KIT="${VARIANT}"
 
 WORKDIR /home/builder
 USER builder
@@ -202,7 +217,11 @@ RUN --mount=target=/host \
 
 # Copies kit artifacts from the previous stage to their expected location so that buildsys
 # can find them and copy them out.
-FROM scratch AS kit
+# FIXME: uncomment this
+#FROM scratch AS kit
+
+# HACK: I am too lazy to make build-kit work so this just shadows build-variant.
+FROM scratch as variant
 COPY --from=kitbuild /home/builder/output/. /output/
 
 ############################################################################################
@@ -232,10 +251,15 @@ RUN --mount=target=/host \
    && rpm -qp --provides rpmbuild/RPMS/${ARCH}/bottlerocket-metadata-*.${ARCH}.rpm \
    && echo ${NOCACHE}
 
+## FIXME: set this via buildsys and move up with other ARGs
+ENV KITS="core-kit extra-1-kit extra-2-kit extra-3-kit"
+
 WORKDIR /root
 USER root
 RUN --mount=target=/host \
     for pkg in ${PACKAGES} ; do \
+      # FIXME: remove this check, this dir should always exist \
+      [ -d "/host/build/rpms/${pkg}" ] || continue ; \
       ln -s /host/build/rpms/${pkg}/*.rpm ./rpmbuild/RPMS ; \
     done && \
     ln -s /home/builder/rpmbuild/RPMS/*/*.rpm ./rpmbuild/RPMS && \
@@ -248,6 +272,8 @@ RUN --mount=target=/host \
     echo '%_dbpath %{_sharedstatedir}/rpm' >> /etc/rpm/macros && \
     declare -a KIT_REPOS && \
     for kit in ${KITS} ; do \
+      # FIXME: remove this check, this should also always exist \
+      [ -s "/host/build/kits/${kit}/${ARCH}/repodata/repomd.xml" ] || continue ; \
       KIT_REPOS+=("--repofrompath=${kit},/host/build/kits/${kit}/${ARCH}" --enablerepo "${kit}") \
     done && \
     dnf -y \
@@ -372,7 +398,7 @@ RUN --mount=target=/host \
 # =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^= =^..^=
 # Copies the build artifacts (Bottlerocket image files, migrations, and kmod kit) to their
 # expected location so that buildsys can find them and copy them out.
-FROM scratch AS variant
+FROM scratch AS variant-NOPE
 COPY --from=imgbuild /local/output/. /output/
 COPY --from=migrationbuild /local/output/. /output/
 COPY --from=kmodkitbuild /local/output/. /output/
